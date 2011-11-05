@@ -1,0 +1,213 @@
+#!/usr/bin/env python
+"""fpsync --- Directory synchronization utility.
+
+USAGE
+
+  fpsync [options] up|down|sync
+
+This script updates a family of directories which exist in two different
+places in the filesystem.  It is meant for updating a laptop to a server (in
+either direction), where the server's directory is NFS mounted in the laptop,
+or with password-less ssh logins.
+
+The list of files and directories to be updated is given in a python
+configuration file, located by default in either ~/.fpsyncrc.py or
+~/usr/etc/fpsyncrc.py (use the -config option to override).
+
+
+MANDATORY ARGUMENTS
+
+- A mode, which must be 'up', 'down' or 'sync', indicating the direction for
+the update process.
+
+
+OPTIONS
+
+Options can be abbreviated to their shortest non-ambiguous form.
+
+  -config <filename>: name of the configuration file which defines the files
+  and directories to be updated, to override the defaults.
+  
+  -dry-run: this option is passed directly to rsync. It allows you to see
+  what rsync would do without actually performing it.
+  
+  -help: print this message and exit.
+
+  -debug: run in debug mode. Only print the system calls to be made without
+  executing them.
+
+  -verbose: print all system calls to stdout.
+"""
+from __future__ import print_function
+
+__author__  = 'Fernando Perez <fperez@colorado.edu>'
+__version__ = '0.1'
+__date__    = 'Wed Mar 26 19:55:01 MST 2003'
+
+#***************************************************************************
+
+# Standard library modules
+import os
+import subprocess
+
+
+# Global names
+
+warn = print
+
+# Constants
+SEPARATOR = '-'*78
+
+# Class and function definitions
+class NotGiven: pass  # use to distinguish from None in default arguments
+
+
+class FoundIt(Exception): pass
+
+
+def system(cmd):
+    if system.verbose:
+        print('***CMD***', cmd)
+    if not system.debug:
+        subprocess.call(cmd, shell=True)
+
+system.verbose = False
+system.debug = False
+
+
+def init():
+    """Initialization and command-line processing.
+
+    It creates the global names:
+     - sysx: instance of SystemExec, can be used for system calls.
+     - system: alias to sysx.system.
+
+    Returns an options namespace."""
+
+    # Names and default values for command-line options
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Sync two directories')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--config', type=str)
+    parser.add_argument('mode', choices=['up','down','sync'])
+    
+    # Process command line.
+    opt = parser.parse_args()
+
+    #opt.debug=True # dbg
+    #print(opt);import sys; sys.exit()  # dbg
+    
+    # Object to execute system calls
+    system.verbose = opt.verbose
+    system.debug = opt.debug
+    return opt
+
+
+def expand(arg):
+    """Expand ~ and $ variables in a string"""
+    
+    return os.path.expanduser(os.path.expandvars(arg))
+
+
+def do_update(opt, to_update, mode, nodelete=''):
+    """Do the update according to the cfg structure and mode given"""
+
+    if nodelete:
+        nodelete = "--nodelete" # when syncing, prevent dircopy from deleting
+
+    for entry in to_update:
+        # options to pass through to rsync
+        rsopt = []
+        if opt.dry_run:
+            rsopt.append(r'\--dry-run')
+
+        dir_from,dir_to = entry['dir1'],entry['dir2']
+        if mode=='down':
+            dir_from,dir_to = dir_to,dir_from
+        command = ['dircopy %(nodelete)s --log  $HOME/.fpsync.log'
+                   % locals() ]
+        if entry['exclude_from']:
+            rsopt.append(r"\--exclude-from=%s" %
+                           expand(entry['exclude_from']))
+        if rsopt:
+            command.append('--rsoptions "%s"' % ' '.join(rsopt))
+        if ':' in dir_from:
+            # Assemble the right command for a multiple-remote-files rsync
+            # call, which is a bit delicate.  Be careful to escape all quotes
+            # so they are protected in the dircopy call.
+            host,base = dir_from.split(':',1)
+            target_base = [r"%s:\'" % host]
+            for target in entry['to_update']:
+                target = '%s/%s ' % (base,target)
+                target_base.append(target)
+            target_base.append(r"\'")
+            command.append(''.join(target_base))
+        else:
+            for target in entry['to_update']:
+                target = '%s/%s' % (dir_from,target)
+                command.append(target)
+        command.append(dir_to)
+        command = ' '.join(command)
+        print(SEPARATOR)
+        system(command)
+
+def main():
+    """Real logic goes here."""
+
+    opt = init()
+
+    # Load configuration file which defines a few globals
+    if opt.config:
+        config_files = (opt.config,)
+    else:
+        config_files = ('~/.fpsyncrc.py','~/usr/etc/fpsyncrc.py')
+
+    try:
+        for config_file in config_files:
+            config_file = expand(config_file)
+            if os.path.isfile(config_file):
+                raise FoundIt
+    except FoundIt:
+        if opt.verbose:
+            print("*** Using config file:",config_file)
+    else:
+        warn.fatal("Config file not found in any of [%s!]" % config_files)
+
+    cfg = {}
+    execfile(config_file,cfg)
+    must_exist = cfg['MUST_EXIST']
+    to_update_cfg = cfg['TO_UPDATE']
+
+    if 'at_startup' in cfg:
+        print(SEPARATOR)
+        print('Calling at_startup from user-supplied configuration...')
+        print()
+        cfg['at_startup']()
+        print()
+        print('Done with at_startup() operations.')
+
+    # MUST_EXIST can be either a single path or a list of them.  If it's more
+    # than one, they ALL must exist.
+    if isinstance(must_exist,basestring):
+        must_exist = [must_exist]
+    for must_file in must_exist:
+        if not os.path.exists(expand(must_file)):
+            warn.fatal("MUST_EXIST file/dir <%s> not found!" % must_file)
+
+    if opt.mode=='sync':
+        do_update(opt, to_update_cfg,'up',nodelete=1)
+        do_update(opt, to_update_cfg,'down',nodelete=1)
+    else:
+        do_update(opt, to_update_cfg, opt.mode)
+
+    if 'at_exit' in cfg:
+        print(SEPARATOR)
+        print('Calling at_exit from user-supplied configuration...')
+        print()
+        cfg['at_exit']()
+
+if __name__ == '__main__': main()
+#*********************** End of file <fpsync.py> *************************

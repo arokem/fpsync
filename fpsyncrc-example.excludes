@@ -1,0 +1,12 @@
+# files to exclude from synchronization with server
+
+# temporary stuff
+research/scratch
+
+# large datasets
+research/data
+
+.lyx/preferences
+.lyx/lyxpipe.in
+.lyx/lyxpipe.out
+.lyx/cache

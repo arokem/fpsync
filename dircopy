@@ -1,0 +1,273 @@
+#!/usr/bin/env python
+"""Simple rsync wrapper for making directory images and synchronizing dirs.
+
+USAGE
+  dircopy [options] from1 from2 ... destination_dir
+
+Make an image of all files/directories given in the command line to the last
+argument given.
+
+The last argument must be either an existing directory or a name which doesn't
+exist in the filesystem. In the latter case, a directory will be created with
+that name (a warning is issued). If the destination is given as a file, the
+program aborts.
+
+If the destination contains ':', all checks are ignored as this will be
+treated by rsync as a remote transfer.  In this case, a '-e ssh' is
+automatically added to the rsync options.  It has only been tested between
+hosts which have been configured for password-less ssh logins.
+
+By default, dircopy will make the destination look like the source, meaning
+that any pre-existing files in the destination WILL BE DELETED if they are not
+in the source. In order to synchronize two directories keeping the most recent
+versions of each file, use the -sync option (see below).
+
+dircopy uses rsync for the actual data transfer (so it's fast). Please see the
+rsync manpage for all the relevant details on its use.
+
+
+OPTIONS
+
+All options can be abbreviated to their shortest non-ambiguous form.
+
+  -dry-run, -n: this option is passed directly to rsync. It allows you to see
+  what rsync would do without actually performing it. The same effect can be
+  achieved using -rsoptions '-n', so this is just a convenience option.
+  
+  -help: print this message and exit.
+
+  -debug: don't execute any system call, just print them.
+
+  -logname <filename>: log output to this file. If logfile isn't given, the
+  name .dircopy.log is used in the destination directory.
+
+  -nolog: suppress logfile generation.
+
+  -quiet: do not print anything to stdout (useful for cron jobs), but the
+  logfile is still generated.
+
+  -nodelete: override the default behavior and do NOT delete files which do
+  not exist in the destination.  This has no effect if -sync is invoked.
+  
+  -rsoptions <string>: options to be passed verbatim to rsync. The whole
+  string must be protected with single or double quotes (so it can be
+  considered as a single element and not as separate options for dircopy).
+
+  -sync: synchronize two directories by comparing timestamps. In this
+  mode only two arguments can be given, dir1 and dir2. The process is:
+
+   1) dir1 -> dir2. Files in dir2 newer than in dir1 are respected.
+   2) dir2 -> dir1. Files in dir1 newer than in dir2 are respected.
+
+  In this mode, files are not deleted from either directory. The process is
+  completely symmetrical between dir1 and dir2. In both sync modes (see -Dsync
+  below) a trailing '/' is appended to the directory names automatically. See
+  the rsync manpage for details on the semantics of trailing '/' in directory
+  names.
+
+  -Dsync: similar to sync, but in step 1), files which do not exist in the
+  source are deleted from the destination.
+
+  USE WITH CARE. Files which exist in both directories will be properly
+  synchronized by timestamp, but the process is NOT symmetrical between source
+  and destination because of the deletion mechanism.
+
+  -verbose: print all system calls to stdout.
+"""
+from __future__ import print_function
+
+__author__  = 'Fernando Perez <fperez@colorado.edu>'
+__date__    = 'Mon Nov 18 15:36:35 MST 2002'
+
+#***************************************************************************
+# Standard library modules
+import os
+import shutil
+import subprocess
+from time import ctime
+from tempfile import mktemp
+
+# Global names
+#from IPython.utils import warn
+warn = print
+
+#***************************************************************************
+# Class and function definitions
+class NotGiven: pass  # use to distinguish from None in default arguments
+
+
+def system(cmd):
+    if system.verbose:
+        print('***CMD***', cmd)
+    if not system.debug:
+        subprocess.call(cmd, shell=True)
+
+system.verbose = False
+system.debug = False
+
+
+def init():
+    """Initialization and command-line processing.
+
+    It creates the global names:
+     - sysx: instance of SystemExec, can be used for system calls.
+     - system: alias to sysx.system.
+
+    Returns a Struct with options and a list of positional arguments."""
+
+    # Names and default values for command-line options
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Sync two directories')
+    for flag in ('dry-run n debug verbose quiet '
+                 'sync Dsync nolog nodelete').split():
+        parser.add_argument('--'+flag , action='store_true')
+    parser.add_argument('--rsoptions', type=str, default='')
+    parser.add_argument('--logname', type=str, default='')
+    parser.add_argument('sources',type=str,nargs='+')
+    parser.add_argument('dest',type=str)
+        
+    # Process command line.
+    opt = parser.parse_args()
+
+    #print(opt); import sys; sys.exit()  # dbg
+
+    system.verbose = opt.verbose
+    system.debug = opt.debug
+
+    return opt
+
+def print_transfer(log,src,dest):
+    print('.'*80, file=log)
+    print(src,'|--->',dest, file=log)
+    print(file=log)
+    log.flush()
+
+
+def escape(s):
+    #return s.replace(' ','\\ ')
+    #return "'%s'" % s
+    return s
+    
+def main():
+    """Real logic goes here."""
+
+    default_logname = '.dircopy.log'
+    opt = init()
+    
+    # Positional arguments
+    cp_from = ' '.join(opt.sources)
+    cp_to  = opt.dest
+
+    if not ':' in cp_to:
+        # don't try to create directories across the network
+        if not os.path.exists(cp_to):
+            warn("Destination directory %s doesn't exist. Creating it." % cp_to)
+	    os.makedirs(cp_to)
+        elif not os.path.isdir(cp_to):
+            warn('The last argument must be a directory.',level=4)
+
+    if opt.logname:
+        logname = opt.logname
+    else:
+        logname = cp_from+'/'+default_logname
+        
+    
+    if opt.Dsync:
+        opt.sync = 2
+
+    if opt.sync and not os.path.isdir(cp_from):
+        warn('sync mode can only be invoked with two directories.',4)
+
+    # simplify the tricky semantics of /-terminated names in rsync
+    if opt.sync:
+        if os.path.isdir(cp_from):
+            cp_from += '/'
+        cp_to += '/'
+
+    # Escape out possible spaces in paths
+    cp_to = escape(cp_to)
+    cp_from = escape(cp_from)
+
+    print('to:', cp_to)  # dbg
+    print('fr:', cp_from)  # dbg
+
+    if opt.dry_run or opt.n:
+        opt.rsoptions += ' --dry-run'
+
+    # Create logfile. We need to log to a temp file outside of the working
+    # directories so it doesn't get clobbered when syncing
+    log_tmpname = mktemp()
+    log = file(log_tmpname,'a')
+    start = ctime()
+    header = """\
+*** dircopy log
+Starting    : %s
+Called from : %s
+Source      : %s
+Destination : %s
+Mode        : %s
+rsync opts  : %s
+
+Output of rsync:
+""" % (start,os.getcwd(),cp_from,cp_to,
+       ['image','sync','Dsync - destructive sync'][opt.sync],
+       opt.rsoptions)
+
+    print(header, file=log)
+    log.flush()  # so shell writes are properly ordered
+
+    rsopt = '-avH ' + opt.rsoptions
+    if ':' in cp_from or ':' in cp_to:
+        rsopt += ' -e ssh '
+    if opt.sync:
+        if opt.Dsync:
+            rsopt += ' --delete '
+        print_transfer(log,cp_from,cp_to)
+        system('rsync %(rsopt)s -u  %(cp_from)s %(cp_to)s | '
+               'tee %(log_tmpname)s 2>&1' % locals() )
+        print(file=log)
+        print_transfer(log,cp_to,cp_from)
+        system('rsync %(rsopt)s -u  %(cp_to)s %(cp_from)s | '
+               'tee %(log_tmpname)s 2>&1'  % locals() )
+    else:
+        if opt.nodelete:
+            to_delete = ""
+        else:
+            to_delete = "--delete"
+        print_transfer(log,cp_from,cp_to)
+        cmd = ('rsync %(rsopt)s -u %(to_delete)s  %(cp_from)s %(cp_to)s | '
+               'tee %(log_tmpname)s 2>&1' % locals())
+        print('CMD:',cmd)  # dbg
+        system(cmd)
+
+    print("\n*** dircopy started  :",start, file=log)
+    print("*** dircopy finished :",ctime(), file=log)
+    log.close()
+
+##    if not opt.quiet:
+##        # print(out log to screen)
+##        system('cat %s' % log_tmpname)
+
+    # update the logfile
+    if not opt.nolog:
+        try:
+            os.rename(log_tmpname,logname)
+            print('Log info left in:',logname)
+        except OSError:
+            # moving across filesystem boundaries fails in linux
+            if ':' not in logname:
+                # Don't try to copy the logfile over ssh
+                shutil.copy2(log_tmpname,logname)
+                print('Log info left in:',logname)
+            os.unlink(log_tmpname)
+        # the logfile won't be properly synced, but we can't do it over ssh
+        if opt.sync and not (':' in cp_to or ':' in cp_from):
+            log_dir = os.path.dirname(os.path.abspath(logname))
+            if os.path.samefile(log_dir,cp_from):
+                shutil.copy2(logname,cp_to)
+            elif os.path.samefile(log_dir,cp_to):
+                shutil.copy2(logname,cp_from)
+
+if __name__ == '__main__': main()
+#*********************** End file <dircopy> ********************************
