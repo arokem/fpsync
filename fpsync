@@ -124,6 +124,8 @@ def do_update(opt, to_update, mode, nodelete=''):
         if opt.dry_run:
             rsopt.append(r'\--dry-run')
 
+        rsopt.append(r'\-vi')
+
         dir_from,dir_to = entry['dir1'],entry['dir2']
         if mode=='down':
             dir_from,dir_to = dir_to,dir_from
@@ -151,6 +153,7 @@ def do_update(opt, to_update, mode, nodelete=''):
                 command.append(target)
         command.append(dir_to)
         command = ' '.join(command)
+        command += ' | highlight_newer.py'
         print(SEPARATOR)
         system(command)
 
