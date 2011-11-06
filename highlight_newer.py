@@ -6,6 +6,9 @@ catch_string = 'is newer'
 
 files = []
 for line in sys.stdin:
+    if line.startswith('cd') or line.startswith('*deleting'):
+        continue
+
     if line and line[0] in '.<>[':
         continue
     
